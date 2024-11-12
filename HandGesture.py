@@ -4,122 +4,107 @@ import time
 
 # Initialize MediaPipe Hands and drawing utilities
 mp_hands = mp.solutions.hands
-hand_detector = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.7)  # Allow detection of multiple hands
+mp_drawing = mp.solutions.drawing_utils
+hand_detector = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.7)
 
 # Gesture detection variables
 gesture = None
-swipe_threshold_horizontal = 0.2
+swipe_threshold_horizontal = 0.1
 swipe_threshold_vertical = 0.1
-diagonal_threshold = 0.05  # A smaller threshold to detect diagonal gestures
 prev_position = None
-last_gesture_time = 0  # To store the time of the last detected gesture
-horizontal_cooldown = 0.5  # Cooldown time in seconds to prevent rapid left/right gesture detection
-vertical_cooldown = 0.2  # Cooldown time in seconds to prevent rapid up/down gesture detection
+last_horizontal_gesture_time = 0
+last_vertical_gesture_time = 0
+horizontal_cooldown = 1.0
+vertical_cooldown = 1.0
 
+# Function to detect swipe gestures
 def detect_swipe_gesture(landmarks):
-    global gesture, prev_position, last_gesture_time
+    global gesture, prev_position, last_horizontal_gesture_time, last_vertical_gesture_time
 
     # Get the coordinates of the index and middle finger tips (landmarks 8 and 12)
     index_tip = landmarks[8]
     middle_tip = landmarks[12]
 
-    # Use average of index and middle finger tips for swipe detection
+    # Use the average of index and middle finger tips for swipe detection
     avg_x = (index_tip.x + middle_tip.x) / 2
     avg_y = (index_tip.y + middle_tip.y) / 2
     current_time = time.time()
 
-    # Calculate movement from previous position
     if prev_position:
-        dx = avg_x - prev_position[0]  # Horizontal movement
-        dy = prev_position[1] - avg_y  # Vertical movement (y-axis inverted)
+        dx = avg_x - prev_position[0]
+        dy = prev_position[1] - avg_y
 
-        # Detect gesture only when it surpasses the cooldown period
-        if abs(dx) > abs(dy):  # Primarily horizontal movement
-            if (current_time - last_gesture_time) > horizontal_cooldown:
+        # Horizontal swipe detection
+        if abs(dx) > abs(dy):
+            if (current_time - last_horizontal_gesture_time) > horizontal_cooldown:
                 if dx > swipe_threshold_horizontal:
-                    if dy < -diagonal_threshold:  # Diagonal down-right (Right + Down)
-                        gesture = "RIGHT"
-                    else:
-                        gesture = "RIGHT"
+                    gesture = "RIGHT"
+                    last_horizontal_gesture_time = current_time
                 elif dx < -swipe_threshold_horizontal:
-                    if dy < -diagonal_threshold:  # Diagonal down-left (Left + Down)
-                        gesture = "LEFT"
-                    else:
-                        gesture = "LEFT"
-                if gesture:
-                    last_gesture_time = current_time
-        else:  # Primarily vertical movement
-            if (current_time - last_gesture_time) > vertical_cooldown:
-                if dy > swipe_threshold_vertical:
-                    if abs(dx) > diagonal_threshold:  # Detect diagonal up movement
-                        if dx > 0:
-                            gesture = "UP"
-                        else:
-                            gesture = "UP"
-                    else:
-                        gesture = "UP"
-                elif dy < -swipe_threshold_vertical:
-                    if abs(dx) > diagonal_threshold:  # Detect diagonal down movement
-                        if dx > 0:
-                            gesture = "DOWN"
-                            gesture = "RIGHT"  # Diagonal down-right
-                        else:
-                            gesture = "DOWN"
-                            gesture = "LEFT"  # Diagonal down-left
-                    else:
-                        gesture = "DOWN"
-                if gesture:
-                    last_gesture_time = current_time
+                    gesture = "LEFT"
+                    last_horizontal_gesture_time = current_time
 
-    # Update previous position
+        # Vertical swipe detection
+        else:
+            if (current_time - last_vertical_gesture_time) > vertical_cooldown:
+                if dy > swipe_threshold_vertical:
+                    gesture = "UP"
+                    last_vertical_gesture_time = current_time
+                elif dy < -swipe_threshold_vertical:
+                    gesture = "DOWN"
+                    last_vertical_gesture_time = current_time
+
     prev_position = (avg_x, avg_y)
     return gesture
 
-# Initialize webcam
-cap = cv2.VideoCapture(0)
+# Function to continuously detect gestures
+def start_gesture_detection():
+    global gesture
+    cap = cv2.VideoCapture(0)
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    # Flip the frame to avoid mirrored view
-    frame = cv2.flip(frame, 1)
+        frame = cv2.flip(frame, 1)
+        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hand_detector.process(image)
 
-    # Convert the BGR image to RGB
-    image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if results.multi_hand_landmarks:
+            nearest_hand = None
+            min_z = float('inf')
 
-    # Detect hand landmarks
-    results = hand_detector.process(image)
+            # Find the nearest hand
+            for hand_landmarks in results.multi_hand_landmarks:
+                wrist_z = hand_landmarks.landmark[0].z
+                if wrist_z < min_z:
+                    min_z = wrist_z
+                    nearest_hand = hand_landmarks
 
-    # Check if hand landmarks are detected
-    if results.multi_hand_landmarks:
-        nearest_hand = None
-        min_z = float('inf')  # Initialize with a large value to find the nearest hand
+            if nearest_hand:
+                detected_gesture = detect_swipe_gesture(nearest_hand.landmark)
+                
+                # Write the gesture to the file only if it changes
+                if detected_gesture:
+                    with open('gesture.txt', 'w') as f:
+                        f.write(detected_gesture)
+                    gesture = None  # Reset only after writing to ensure proper detection
 
-        # Loop through detected hands to find the nearest one
-        for hand_landmarks in results.multi_hand_landmarks:
-            wrist_z = hand_landmarks.landmark[0].z  # Z coordinate of the wrist (landmark 0)
-            if wrist_z < min_z:  # A smaller Z value means the hand is closer
-                min_z = wrist_z
-                nearest_hand = hand_landmarks
+                # Draw landmarks only for the nearest hand
+                mp_drawing.draw_landmarks(frame, nearest_hand, mp_hands.HAND_CONNECTIONS)
 
-        # If a nearest hand is found, process its gesture
-        if nearest_hand:
-            gesture = detect_swipe_gesture(nearest_hand.landmark)
+                if detected_gesture:
+                    cv2.putText(frame, f"Gesture: {detected_gesture}", (50, 50),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
 
-            # Print the detected gesture to the console if a gesture was detected
-            if gesture:
-                print(gesture)
-                gesture = None  # Reset gesture after displaying in the console
+        # Display the frame
+        
+        cv2.imshow('Hand Gesture Detection', frame)
+        
+        # Quit with 'q' key
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-    # Display the frame for visual reference (optional)
-    cv2.imshow('Hand Gesture Detection', frame)
-
-    # Exit on pressing 'q'
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# Release resources
-cap.release()
-cv2.destroyAllWindows()
+    cap.release()
+    cv2.destroyAllWindows()
